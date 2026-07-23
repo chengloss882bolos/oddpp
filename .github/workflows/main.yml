@@ -9,7 +9,7 @@ jobs:
     timeout-minutes: 355  # 5 jam 55 menit (buffer)
 
     steps:
-      # --- STEP 1-4: PERSIS VIDEO ---
+      # --- STEP 1: KONFIGURASI RDP ---
       - name: Configure Core RDP Settings
         run: |
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
@@ -17,6 +17,7 @@ jobs:
           netsh advfirewall firewall add rule name="RDP" dir=in action=allow protocol=TCP localport=3389
           Restart-Service -Name TermService -Force
 
+      # --- STEP 2: BUAT USER RDP ---
       - name: Create RDP User
         run: |
           $password = "P@ssw0rd123"
@@ -27,21 +28,66 @@ jobs:
           echo "RDP_USER=RDPUser" >> $env:GITHUB_ENV
           echo "RDP_PASS=$password" >> $env:GITHUB_ENV
 
+      # --- STEP 3: INSTALL TAILSCALE ---
       - name: Install Tailscale
         run: |
           iwr https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi -OutFile $env:TEMP\ts.msi
           msiexec /i $env:TEMP\ts.msi /quiet /norestart
           sleep 10
 
+      # --- STEP 4: TAILSCALE CONNECTION (MANUAL DENGAN RETRY) ---
       - name: Establish Tailscale Connection
         env:
           TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
         run: |
-          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=$env:TAILSCALE_AUTH_KEY --hostname=gh-$env:GITHUB_RUN_ID
+          Write-Host "🚀 Starting Tailscale connection with retry mechanism..."
+          
+          $maxRetries = 5
+          $retryDelay = 10  # detik
+          $connected = $false
+          
+          for ($i = 1; $i -le $maxRetries; $i++) {
+              Write-Host "`n📡 Attempt $i of $maxRetries..."
+              
+              try {
+                  # Coba connect dengan timeout
+                  $process = Start-Process -FilePath "C:\Program Files\Tailscale\tailscale.exe" `
+                      -ArgumentList "up --authkey=$env:TAILSCALE_AUTH_KEY --hostname=gh-$env:GITHUB_RUN_ID --timeout=30s" `
+                      -Wait -PassThru -NoNewWindow
+                  
+                  if ($process.ExitCode -eq 0) {
+                      Write-Host "✅ Connected successfully!"
+                      $connected = $true
+                      break
+                  } else {
+                      Write-Host "⚠️  Exit code: $($process.ExitCode)"
+                  }
+              } catch {
+                  Write-Host "⚠️  Error: $_"
+              }
+              
+              if ($i -lt $maxRetries) {
+                  Write-Host "⏳ Waiting $retryDelay seconds before retry..."
+                  Start-Sleep -Seconds $retryDelay
+              }
+          }
+          
+          if (-not $connected) {
+              Write-Host "❌ Failed to connect after $maxRetries attempts"
+              exit 1
+          }
+          
+          # Verifikasi koneksi
+          Write-Host "`n🔍 Verifying connection..."
+          $status = & "C:\Program Files\Tailscale\tailscale.exe" status
+          Write-Host $status
+          
+          # Dapatkan IP
           $ip = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
           echo "TAILSCALE_IP=$ip" >> $env:GITHUB_ENV
+          Write-Host "`n✅ Tailscale IP: $ip"
 
-      # --- STEP 5: ANTI-IDLE SCRIPT (TAMBAHAN) ---
+      # --- STEP 5: ANTI-IDLE SCRIPT ---
       - name: Setup Simple Anti-Idle
         run: |
           # Buat script keep-alive sederhana
@@ -72,7 +118,7 @@ jobs:
           echo "⏳ Durasi: ~6 jam"
           echo "========================================"
           
-          # Keep workflow running (tidak pakai while true)
+          # Keep workflow running
           $start = Get-Date
           $duration = 350  # 5 jam 50 menit dalam menit
           
